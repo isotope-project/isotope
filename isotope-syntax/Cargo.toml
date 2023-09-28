@@ -1,0 +1,14 @@
+[package]
+name = "isotope-syntax"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ecow = "0.1.2"
+fxhash = "0.2.1"
+winnow = "0.5.15"
+
+[dev-dependencies]
+proptest = "1.2.0"
