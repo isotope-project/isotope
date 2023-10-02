@@ -11,7 +11,7 @@ pub struct Bitvector {
     pub negate: bool,
     /// This literal's bitwidth
     pub bitwidth: u32,
-    /// This literal's radix
+    /// This literal's data
     pub radix: Radix,
     /// This literal's digits. Note that this _may_ be invalid!
     pub digits: EcoString,
