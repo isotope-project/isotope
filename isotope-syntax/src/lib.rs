@@ -5,6 +5,8 @@ Syntax and parsing for `isotope` IR
 use ecow::EcoString;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
+use winnow::ascii::multispace0;
+use winnow::combinator::delimited;
 use winnow::prelude::*;
 use winnow::{
     ascii::{dec_uint, hex_digit1, multispace1},
@@ -78,6 +80,7 @@ impl Expr {
     pub fn atom(input: &mut &str) -> PResult<Expr> {
         //TODO: parse tuples
         alt((
+            delimited(("(", multispace0), Expr::expr, (multispace0, ")")),
             Bitvector::parser.map(Expr::Bitvector),
             Ident::parser.map(Expr::Ident),
         ))
@@ -194,16 +197,30 @@ mod test {
             assert_eq!(
                 Expr::expr.parse(&i).unwrap(),
                 Expr::ident(&*i)
-            )
+            );
+            assert_eq!(
+                Expr::expr.parse(&format!("({i})")).unwrap(),
+                Expr::ident(&*i)
+            );
+            assert_eq!(
+                Expr::expr.parse(&format!("(({i}))")).unwrap(),
+                Expr::ident(&*i)
+            );
         }
 
         #[test]
         fn ident_app_parsing(f in "[[:alpha:]][[:alnum:]]*", x in "[[:alpha:]][[:alnum:]]*") {
-            let e = format!("{f} {x}");
-            assert_eq!(
-                Expr::expr.parse(&e).unwrap(),
-                Expr::App(App { func: Ident(f.into()), arg: Expr::ident(x).into() })
-            )
+            let es = [
+                format!("{f} {x}"),
+                format!("({f} {x})"),
+                format!("(({f} {x}))"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::App(App { func: Ident((&*f).into()), arg: Expr::ident(&*x).into() })
+                )
+            }
         }
     }
 }
