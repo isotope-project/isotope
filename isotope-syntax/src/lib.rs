@@ -6,10 +6,10 @@ use ecow::EcoString;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 use winnow::ascii::multispace0;
-use winnow::combinator::delimited;
+use winnow::combinator::{delimited, separated0};
 use winnow::prelude::*;
 use winnow::{
-    ascii::{dec_uint, hex_digit1, multispace1},
+    ascii::{dec_uint, hex_digit1},
     combinator::{alt, dispatch, fail, opt, preceded, success},
     token::any,
 };
@@ -64,7 +64,7 @@ impl Expr {
     /// Parse an expression
     pub fn expr(input: &mut &str) -> PResult<Expr> {
         dispatch! { Expr::atom;
-            Expr::Ident(first) => opt(preceded(multispace1, Expr::atom)).map(|arg| {
+            Expr::Ident(first) => opt(preceded(multispace0, Expr::atom)).map(|arg| {
                 let first = first.clone();
                 match arg {
                     Some(arg) => Expr::App(App { func: first, arg: Box::new(arg) }),
@@ -78,9 +78,22 @@ impl Expr {
 
     /// Parse an atomic expression
     pub fn atom(input: &mut &str) -> PResult<Expr> {
-        //TODO: parse tuples
         alt((
-            delimited(("(", multispace0), Expr::expr, (multispace0, ")")),
+            delimited(
+                ("(", multispace0),
+                (
+                    separated0(Expr::expr, (multispace0, ",", multispace0)),
+                    opt((multispace0, ",")),
+                )
+                    .map(|(mut v, t): (Vec<_>, _)| {
+                        if v.len() == 1 && t.is_none() {
+                            v.remove(0)
+                        } else {
+                            Expr::Tuple(Tuple(v))
+                        }
+                    }),
+                (multispace0, ")"),
+            ),
             Bitvector::parser.map(Expr::Bitvector),
             Ident::parser.map(Expr::Ident),
         ))
@@ -191,6 +204,15 @@ mod test {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn empty_tuple_parses() {
+        assert_eq!(Expr::default(), Expr::Tuple(Tuple(vec![])));
+        assert_eq!(Tuple::default(), Tuple(vec![]));
+        assert_eq!(Pattern::default(), Pattern::Tuple(vec![]));
+        assert_eq!(Expr::expr.parse("()").unwrap(), Expr::default());
+        assert_eq!(Expr::expr.parse("(,)").unwrap(), Expr::default());
+    }
+
     proptest! {
         #[test]
         fn ident_parsing(i in "[[:alpha:]][[:alnum:]]*") {
@@ -206,19 +228,55 @@ mod test {
                 Expr::expr.parse(&format!("(({i}))")).unwrap(),
                 Expr::ident(&*i)
             );
+            assert_eq!(
+                Expr::ident(&*i),
+                Expr::from(Ident(i.into()))
+            )
         }
 
         #[test]
-        fn ident_app_parsing(f in "[[:alpha:]][[:alnum:]]*", x in "[[:alpha:]][[:alnum:]]*") {
+        fn bin_ident_parsing(f in "[[:alpha:]][[:alnum:]]*", x in "[[:alpha:]][[:alnum:]]*") {
             let es = [
                 format!("{f} {x}"),
+                format!("{f} ({x})"),
                 format!("({f} {x})"),
                 format!("(({f} {x}))"),
+                format!("(({f} ({x})))"),
             ];
             for e in es {
                 assert_eq!(
                     Expr::expr.parse(&e).unwrap(),
                     Expr::App(App { func: Ident((&*f).into()), arg: Expr::ident(&*x).into() })
+                )
+            }
+            let es = [
+                format!("({f} {x},)"),
+                format!("(({f} {x},))"),
+                format!("(({f}({x}),))"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::Tuple(Tuple(vec![
+                        Expr::App(App { func: Ident((&*f).into()), arg: Expr::ident(&*x).into() })]))
+                )
+            }
+            let es = [
+                format!("({f}, {x})"),
+                format!("({f}, ({x}),)"),
+                format!("(({f}, {x}))"),
+                format!("(({f}, {x},))"),
+                format!("({f},{x})"),
+                format!("({f},({x}),)"),
+                format!("(({f},{x}))"),
+                format!("(({f},{x},))"),
+                format!("({f},{x}, )"),
+                format!("({f} ,{x} , )"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::Tuple(Tuple(vec![Expr::ident(&*f), Expr::ident(&*x)]))
                 )
             }
         }
