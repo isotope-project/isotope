@@ -44,6 +44,29 @@ impl Expr {
     pub fn ident(s: impl Into<EcoString>) -> Expr {
         Expr::Ident(Ident(s.into()))
     }
+
+    /// Whether an expression is a valid let-pattern
+    pub fn is_pattern(&self) -> bool {
+        match self {
+            Expr::Ident(_) => true,
+            Expr::Tuple(t) => t.0.iter().all(Expr::is_pattern),
+            _ => false,
+        }
+    }
+
+    /// Convert an expression to a pattern, if possible
+    pub fn to_pattern(&self) -> Result<Pattern, ()> {
+        match self {
+            Expr::Ident(i) => Ok(Pattern::Ident(i.clone())),
+            Expr::Tuple(t) => {
+                t.0.iter()
+                    .map(Expr::to_pattern)
+                    .collect::<Result<_, _>>()
+                    .map(Pattern::Tuple)
+            }
+            _ => Err(()),
+        }
+    }
 }
 
 impl Default for Expr {
@@ -64,13 +87,42 @@ impl Expr {
     /// Parse an expression
     pub fn expr(input: &mut &str) -> PResult<Expr> {
         dispatch! { Expr::atom;
-            Expr::Ident(first) => opt(preceded(multispace0, Expr::atom)).map(|arg| {
-                let first = first.clone();
-                match arg {
-                    Some(arg) => Expr::App(App { func: first, arg: Box::new(arg) }),
-                    None => Expr::Ident(first)
-                }
-            }),
+            Expr::Ident(first) => dispatch! { preceded(multispace0, opt("="));
+                Some(_) => (
+                    multispace0,
+                    Expr::expr,
+                    multispace0, ";", multispace0,
+                    Expr::expr).map(|(_, a, _, _, _, e)| Expr::Let(Let {
+                        def: Def {
+                            pattern: Pattern::Ident(first.clone()),
+                            value: Box::new(a)
+                        },
+                        expr: Box::new(e)
+                    })),
+                None => opt(Expr::atom).map(|arg| {
+                    let first = first.clone();
+                    match arg {
+                        Some(arg) => Expr::App(App { func: first, arg: Box::new(arg) }),
+                        None => Expr::Ident(first)
+                    }
+                })
+            },
+            Expr::Tuple(tuple)
+                if tuple.0.iter().all(Expr::is_pattern)
+                => dispatch! { preceded(multispace0, opt("="));
+                Some(_) => (
+                    multispace0,
+                    Expr::expr,
+                    multispace0, ";", multispace0,
+                    Expr::expr).map(|(_, a, _, _, _, e)| Expr::Let(Let {
+                        def: Def {
+                            pattern: Pattern::Tuple(tuple.0.iter().map(|e| e.to_pattern().unwrap()).collect()),
+                            value: Box::new(a)
+                        },
+                        expr: Box::new(e)
+                    })),
+                None => success(Expr::Tuple(tuple.clone()))
+            },
             expr => success(expr)
         }
         .parse_next(input)
@@ -165,7 +217,7 @@ pub struct Def {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Pattern {
     /// A name
-    Name(Ident),
+    Ident(Ident),
     /// A tuple of patterns
     Tuple(Vec<Pattern>),
 }
@@ -209,6 +261,7 @@ mod test {
         assert_eq!(Expr::default(), Expr::Tuple(Tuple(vec![])));
         assert_eq!(Tuple::default(), Tuple(vec![]));
         assert_eq!(Pattern::default(), Pattern::Tuple(vec![]));
+        assert_eq!(Expr::default().to_pattern().unwrap(), Pattern::default());
         assert_eq!(Expr::expr.parse("()").unwrap(), Expr::default());
         assert_eq!(Expr::expr.parse("(,)").unwrap(), Expr::default());
     }
@@ -232,6 +285,14 @@ mod test {
                 Expr::ident(&*i),
                 Expr::from(Ident(i.into()))
             )
+        }
+
+        #[test]
+        fn bitvector_parsing(b in "[-]??[1-9][0-9]{0,3}['][bdoh][[:xdigit:]]+") {
+            let bv = Bitvector::parser.parse(&b).unwrap();
+            let e = Expr::expr.parse(&b).unwrap();
+            assert_eq!(e, Expr::Bitvector(bv));
+            assert_eq!(e.to_pattern(), Err(()));
         }
 
         #[test]
@@ -277,6 +338,77 @@ mod test {
                 assert_eq!(
                     Expr::expr.parse(&e).unwrap(),
                     Expr::Tuple(Tuple(vec![Expr::ident(&*f), Expr::ident(&*x)]))
+                )
+            }
+            let es = [
+                format!("{x} = {f}; {x}"),
+                format!("{x} = ({f}); {x}"),
+                format!("({x})={f}; ({x})"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::Let(Let {
+                        def: Def {
+                            pattern: Pattern::Ident(Ident((&*x).into())),
+                            value: Box::new(Expr::ident(&*f))
+                        },
+                        expr: Box::new(Expr::ident(&*x))
+                    })
+                )
+            }
+            let es = [
+                format!("{x} = {x} = {f}; {x}; {x}"),
+                format!("{x} = ({x} = {f}; {x}); {x}"),
+                format!("{x} = {x} = {f}; ({x}); {x}"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::Let(Let {
+                        def: Def {
+                            pattern: Pattern::Ident(Ident((&*x).into())),
+                            value: Box::new(Expr::Let(Let {
+                                def: Def {
+                                    pattern: Pattern::Ident(Ident((&*x).into())),
+                                    value: Box::new(Expr::ident(&*f))
+                                },
+                                expr: Box::new(Expr::ident(&*x))
+                            }))
+                        },
+                        expr: Box::new(Expr::ident(&*x))
+                    })
+                )
+            }
+            let es = [
+                format!("({x},)={f}; ({x})"),
+                format!("({x},)=({f});{x}"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::Let(Let {
+                        def: Def {
+                            pattern: Pattern::Tuple(vec![Pattern::Ident(Ident((&*x).into()))]),
+                            value: Box::new(Expr::ident(&*f))
+                        },
+                        expr: Box::new(Expr::ident(&*x))
+                    })
+                )
+            }
+            let es = [
+                format!("(({x},),)={f}; ({x})"),
+            ];
+            for e in es {
+                assert_eq!(
+                    Expr::expr.parse(&e).unwrap(),
+                    Expr::Let(Let {
+                        def: Def {
+                            pattern: Pattern::Tuple(vec![Pattern::Tuple(vec![Pattern::Ident(Ident((&*x).into()))])]),
+                            value: Box::new(Expr::ident(&*f))
+                        },
+                        expr: Box::new(Expr::ident(&*x))
+                    })
                 )
             }
         }
