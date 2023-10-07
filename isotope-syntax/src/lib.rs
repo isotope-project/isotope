@@ -34,6 +34,8 @@ pub enum Expr {
     Tuple(Tuple),
     /// A let-binding
     Let(Let),
+    /// A nested block
+    Splice(Splice),
     /// A bitvector
     Bitvector(Bitvector),
 }
@@ -146,6 +148,7 @@ impl Expr {
                 (multispace0, ")"),
             ),
             Bitvector::parser.map(Expr::Bitvector),
+            Splice::parser.map(Expr::Splice),
             Ident::parser.map(Expr::Ident),
         ))
         .parse_next(input)
@@ -168,6 +171,34 @@ pub struct Let {
     pub def: Def,
     /// The expression in which the variables are used
     pub expr: Box<Expr>,
+}
+
+/// A spliced block
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct Splice {
+    /// The name of the return label
+    pub label: Label,
+    /// The body's return type
+    pub ty: Type,
+    /// The body of this spliced block
+    pub block: Box<Block>,
+}
+
+impl Splice {
+    /// Parse a spliced block
+    pub fn parser(input: &mut &str) -> PResult<Splice> {
+        separated_pair(
+            separated_pair(Label::parser, multispace0, Type::parser),
+            multispace0,
+            delimited(("{", multispace0), Block::parser, (multispace0, "}")),
+        )
+        .map(|((label, ty), block)| Splice {
+            label,
+            ty,
+            block: Box::new(block),
+        })
+        .parse_next(input)
+    }
 }
 
 /// A tuple
@@ -631,31 +662,55 @@ mod test {
                 format!("#switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d}, }} #where {{ 'l x => x }}"),
                 format!("#switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d}, }} #where {{ 'l x => x, }}"),
             ];
+
+            let sb = Block {
+                defs: vec![],
+                terminator: Terminator::Switch(Switch {
+                    disc: Expr::ident(&*d),
+                    targets: vec![
+                        (bl.clone(), Expr::Bitvector(br.clone()).into()),
+                        (br.clone(), Expr::Bitvector(bl.clone()).into()),
+                    ],
+                    default: Some(Box::new(Branch { target: Label(Ident("l".into())), arg: Expr::ident(&*d).into() }.into()))
+                }),
+                sub_blocks: vec![
+                    (
+                        Label(Ident("l".into())),
+                        Target {
+                            arg: Pattern::Ident(Ident("x".into())),
+                            block: Expr::ident("x").into()
+                        }
+                    )
+                ]
+            };
+
             for e in es {
                 let bp = Block::parser.parse(&e).unwrap();
-                assert_eq!(
-                    bp,
-                    Block {
-                        defs: vec![],
-                        terminator: Terminator::Switch(Switch {
-                            disc: Expr::ident(&*d),
-                            targets: vec![
-                                (bl.clone(), Expr::Bitvector(br.clone()).into()),
-                                (br.clone(), Expr::Bitvector(bl.clone()).into()),
-                            ],
-                            default: Some(Box::new(Branch { target: Label(Ident("l".into())), arg: Expr::ident(&*d).into() }.into()))
-                        }),
-                        sub_blocks: vec![
-                            (
-                                Label(Ident("l".into())),
-                                Target {
-                                    arg: Pattern::Ident(Ident("x".into())),
-                                    block: Expr::ident("x").into()
-                                }
-                            )
-                        ]
-                    }
-                );
+                assert_eq!(bp, sb);
+            }
+
+            let es = [
+                format!("'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d} }} #where {{ 'l x => x }} }}"),
+                format!("'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d} }} #where {{ 'l x => x, }} }}"),
+                format!("'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d}, }} #where {{ 'l x => x }} }}"),
+                format!("'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d}, }} #where {{ 'l x => x, }} }}"),
+            ];
+            let se = Expr::Splice(Splice { label: Label(Ident("r".into())), ty: Type::Ident(Ident("A".into())), block: Box::new(sb) });
+            for e in es {
+                let ep = Expr::parser.parse(&e).unwrap();
+                assert_eq!(ep, se);
+            }
+
+            let es = [
+                format!("f 'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d} }} #where {{ 'l x => x }} }}"),
+                format!("f 'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d} }} #where {{ 'l x => x, }} }}"),
+                format!("f 'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d}, }} #where {{ 'l x => x }} }}"),
+                format!("f 'r A {{ #switch {d} {{ {l} => {r}, {r} => {l}, _ => #br 'l {d}, }} #where {{ 'l x => x, }} }}"),
+            ];
+            let se = Expr::App(App { func: Ident("f".into()), arg: Box::new(se) });
+            for e in es {
+                let ep = Expr::parser.parse(&e).unwrap();
+                assert_eq!(ep, se);
             }
         }
 
