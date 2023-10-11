@@ -6,6 +6,12 @@ use egg_isotope as egg;
 use egg::*;
 use smallvec::SmallVec;
 
+pub mod primitive;
+use primitive::*;
+
+pub mod types;
+use types::*;
+
 /// An `isotope` function in SSA form
 #[derive(Debug, Clone, Default)]
 pub struct Function {
@@ -22,6 +28,26 @@ impl Function {
     pub fn insert_empty_block(&mut self) -> BlockId {
         let ix = self.instructions.len();
         BlockId(ix as u32)
+    }
+
+    /// Construct a bitvector expression
+    pub fn make_bitvector(&mut self, bits: Bitvector) -> ExprId {
+        ExprId(self.terms.add(IsotopeLanguage::Bitvector(bits)))
+    }
+
+    /// Get the type of bitvectors of a given bitwidth
+    pub fn bitvector_ty(&mut self, width: u32) -> TypeId {
+        self.terms.analysis.types.bitvector(width)
+    }
+
+    /// Get the type of an expression
+    pub fn expr_ty(&self, expr: ExprId) -> TypeId {
+        self.terms[expr.0].data.ty
+    }
+
+    /// Get the type of a value
+    pub fn value_ty(&self, value: ValId) -> TypeId {
+        self.terms.analysis.values[value.0 as usize].ty
     }
 
     /// Construct a new instruction in a basic block, without unpacking its arguments
@@ -45,14 +71,30 @@ impl Function {
         ix
     }
 
-    // /// Construct a new instruction in a basic block, unpacking its arguments
-    // pub fn push_unpacked_instruction(
-    //     &mut self,
-    //     block: BlockId,
-    //     expr: ExprId,
-    // ) -> Result<ValRange, ()> {
-    //     Err(())
-    // }
+    /// Construct a new instruction in a basic block, unpacking its arguments
+    pub fn push_unpacked_instruction(
+        &mut self,
+        block: BlockId,
+        expr: ExprId,
+    ) -> Result<ValRange, ()> {
+        let begin = ValId(self.terms.analysis.values.len() as u32);
+        let ty = self.terms[expr.0].data.ty;
+        let arity = self.terms.analysis.types.arity(ty);
+        let end = ValId(begin.0 + arity);
+        let iix = InstId(self.instructions.len() as u32);
+        let value = Value { source: iix, ty };
+        for _ in 0..arity.max(1) {
+            self.terms.analysis.values.push(value)
+        }
+        let instruction = Instruction {
+            value: expr,
+            begin,
+            end,
+            block,
+        };
+        self.instructions.push(instruction);
+        Ok(ValRange(begin.0, end.0))
+    }
 
     /// Set the terminator of a block
     pub fn set_terminator(&mut self, block: BlockId, terminator: TerminatorId) -> Result<(), ()> {
@@ -74,6 +116,8 @@ define_language! {
         Call(GlobalId, Id),
         // A global value
         GlobalId(GlobalId),
+        // A bitvector
+        Bitvector(Bitvector),
         // An integer
         Integer(i64),
 
@@ -85,27 +129,16 @@ define_language! {
     }
 }
 
-define_language! {
-    enum IsotopeKind {
-        // A tuple
-        "tup" = Tup(Tuple),
-        // A bitvector of length n
-        Bitvector(u32),
-        // An integer
-        "int" = Integer,
-        // A type error
-        "error" = TypeError,
-    }
-}
-
 /// The analysis for expressions in an `isotope` function
 #[derive(Debug, Clone, Default)]
 struct IsotopeAnalysis {
     /// The values defined in this function
     values: Vec<Value>,
     /// The types used in this function
-    kinds: EGraph<IsotopeKind, ()>,
+    types: Types,
 }
+
+impl IsotopeAnalysis {}
 
 impl Analysis<IsotopeLanguage> for IsotopeAnalysis {
     type Data = IsotopeMetadata;
@@ -116,26 +149,28 @@ impl Analysis<IsotopeLanguage> for IsotopeAnalysis {
             IsotopeLanguage::ValId(v) => IsotopeMetadata {
                 ty: egraph.analysis.values[v.0 as usize].ty,
             },
-            IsotopeLanguage::Tup(t) => {
-                let mapped =
-                    IsotopeKind::Tup(Tuple(t.0.iter().map(|t| egraph[*t].data.ty.0).collect()));
-                IsotopeMetadata {
-                    ty: TypeId(egraph.analysis.kinds.add(mapped)),
-                }
-            }
+            IsotopeLanguage::Tup(t) => IsotopeMetadata {
+                ty: egraph.analysis.types.tuple(
+                    t.0.iter()
+                        .map(|t| egraph[*t].data.ty)
+                        .collect::<SmallVec<[TypeId; 64]>>(),
+                ),
+            },
             IsotopeLanguage::Ix(_) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::Call(_, _) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::GlobalId(_) => IsotopeMetadata::default(), //TODO
+            IsotopeLanguage::Bitvector(b) => IsotopeMetadata {
+                ty: egraph.analysis.types.bitvector(b.bitwidth()),
+            },
             IsotopeLanguage::Integer(_) => IsotopeMetadata {
-                ty: TypeId(egraph.analysis.kinds.add(IsotopeKind::Integer)),
+                ty: egraph.analysis.types.integer(),
             },
             _ => IsotopeMetadata::default(),
         }
     }
 
     #[inline]
-    fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
-        self.kinds.union(a.ty.0, b.ty.0);
+    fn merge(&mut self, _: &mut Self::Data, _: Self::Data) -> DidMerge {
         DidMerge(false, false)
     }
 }
@@ -169,7 +204,7 @@ struct Instruction {
 }
 
 /// A value in an `isotope` function, which is one of the results of an instruction
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 struct Value {
     /// The instruction this is a child of
     source: InstId,
@@ -216,10 +251,6 @@ pub struct ExprId(Id);
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
 pub struct TerminatorId(Id);
 
-/// The ID of an `isotope` type
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
-pub struct TypeId(Id);
-
 /// The ID of an `isotope` value generated by an instruction
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct ValId(u32);
@@ -235,10 +266,6 @@ pub struct BlockId(u32);
 /// The ID of an `isotope` global
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 struct GlobalId(u32);
-
-/// The ID of an `isotope` type var
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-struct TypeVarId(u32);
 
 macro_rules! prefixed_id {
     ($prefix:literal $name:ident) => {
@@ -273,7 +300,6 @@ prefixed_id!("%" ValId);
 prefixed_id!("#" InstId);
 prefixed_id!("'" BlockId);
 prefixed_id!("@" GlobalId);
-prefixed_id!("!" TypeVarId);
 
 /// A range of `ValId`s
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
@@ -320,27 +346,22 @@ mod test {
             let ni = InstId(n);
             let nb = BlockId(n);
             let ng = GlobalId(n);
-            let nt = TypeVarId(n);
             let fv = format!("%{n}");
             let fi = format!("#{n}");
             let fb = format!("'{n}");
             let fg = format!("@{n}");
-            let ft = format!("!{n}");
             assert_eq!(format!("{nv}"), fv);
             assert_eq!(format!("{ni}"), fi);
             assert_eq!(format!("{nb}"), fb);
             assert_eq!(format!("{ng}"), fg);
-            assert_eq!(format!("{nt}"), ft);
             assert_eq!(format!("{nv:?}"), fv);
             assert_eq!(format!("{ni:?}"), fi);
             assert_eq!(format!("{nb:?}"), fb);
             assert_eq!(format!("{ng:?}"), fg);
-            assert_eq!(format!("{nt:?}"), ft);
             assert_eq!(fv.parse(), Ok(nv));
             assert_eq!(fi.parse(), Ok(ni));
             assert_eq!(fb.parse(), Ok(nb));
             assert_eq!(fg.parse(), Ok(ng));
-            assert_eq!(ft.parse(), Ok(nt));
             assert_eq!("%".parse::<ValId>(), Err(()));
             assert_eq!(fi.parse::<ValId>(), Err(()));
         }
