@@ -1,8 +1,6 @@
 /*!
 In-memory representation for `isotope` IR in SSA form
 */
-use egg_isotope as egg;
-
 use egg::*;
 use smallvec::SmallVec;
 
@@ -11,6 +9,8 @@ use primitive::*;
 
 pub mod types;
 use types::*;
+
+pub mod builder;
 
 /// An `isotope` function in SSA form
 #[derive(Debug, Clone, Default)]
@@ -31,7 +31,7 @@ impl Function {
     }
 
     /// Construct a bitvector expression
-    pub fn make_bitvector(&mut self, bits: Bitvector) -> ExprId {
+    pub fn insert_bitvector(&mut self, bits: Bitvector) -> ExprId {
         ExprId(self.terms.add(IsotopeLanguage::Bitvector(bits)))
     }
 
@@ -106,12 +106,18 @@ impl Function {
 define_language! {
     enum IsotopeLanguage {
         // == Values ==
+        // A de-Bruijn variable
+        VarId(VarId),
         // A local value
         ValId(ValId),
         // A tuple literal
         "tup" = Tup(Tuple),
         // An index into a tuple
         "ix" = Ix([Id; 2]),
+        // A let-binding
+        "let" = Let([Id; 2]),
+        // A tuple destructure
+        "unpack" = Unpack([Id; 2]),
         // An unresolved function call
         Call(GlobalId, Id),
         // A global value
@@ -146,8 +152,17 @@ impl Analysis<IsotopeLanguage> for IsotopeAnalysis {
     #[inline]
     fn make(egraph: &mut EGraph<IsotopeLanguage, Self>, enode: &IsotopeLanguage) -> Self::Data {
         match enode {
+            IsotopeLanguage::VarId(v) => IsotopeMetadata {
+                ty: v.1,
+                affine: true,
+                relevant: true,
+                central: true,
+            },
             IsotopeLanguage::ValId(v) => IsotopeMetadata {
                 ty: egraph.analysis.values[v.0 as usize].ty,
+                affine: true,
+                relevant: true,
+                central: true,
             },
             IsotopeLanguage::Tup(t) => IsotopeMetadata {
                 ty: egraph.analysis.types.tuple(
@@ -155,30 +170,53 @@ impl Analysis<IsotopeLanguage> for IsotopeAnalysis {
                         .map(|t| egraph[*t].data.ty)
                         .collect::<SmallVec<[TypeId; 64]>>(),
                 ),
+                affine: t.0.iter().all(|t| egraph[*t].data.affine),
+                relevant: t.0.iter().all(|t| egraph[*t].data.relevant),
+                central: t.0.iter().all(|t| egraph[*t].data.central),
             },
             IsotopeLanguage::Ix(_) => IsotopeMetadata::default(), //TODO
+            IsotopeLanguage::Let(_) => IsotopeMetadata::default(), //TODO
+            IsotopeLanguage::Unpack(_) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::Call(_, _) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::GlobalId(_) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::Bitvector(b) => IsotopeMetadata {
                 ty: egraph.analysis.types.bitvector(b.bitwidth()),
+                affine: true,
+                relevant: true,
+                central: true,
             },
             IsotopeLanguage::Integer(_) => IsotopeMetadata {
                 ty: egraph.analysis.types.integer(),
+                affine: true,
+                relevant: true,
+                central: true,
             },
             _ => IsotopeMetadata::default(),
         }
     }
 
     #[inline]
-    fn merge(&mut self, _: &mut Self::Data, _: Self::Data) -> DidMerge {
-        DidMerge(false, false)
+    fn merge(&mut self, l: &mut Self::Data, r: Self::Data) -> DidMerge {
+        let affine = l.affine || r.affine;
+        let relevant = l.relevant || r.relevant;
+        let central = l.central || r.central;
+        let lc = affine != l.affine || relevant != l.relevant || central != l.central;
+        let rc = affine != r.affine || relevant != r.relevant || central != r.central;
+        DidMerge(lc, rc)
     }
 }
 
-#[derive(Debug, Clone, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 struct IsotopeMetadata {
     // This value's type
     ty: TypeId,
+    //TODO: pack these bits
+    // Whether this value is affine
+    affine: bool,
+    // Whether this value is relevant
+    relevant: bool,
+    // Whether this value is central
+    central: bool,
 }
 
 /// A basic block in an `isotope` function
@@ -256,7 +294,7 @@ pub struct TerminatorId(Id);
 pub struct ValId(u32);
 
 /// The ID of an `isotope` instruction
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 struct InstId(u32);
 
 /// The ID of an `isotope` block
@@ -297,7 +335,6 @@ macro_rules! prefixed_id {
 }
 
 prefixed_id!("%" ValId);
-prefixed_id!("#" InstId);
 prefixed_id!("'" BlockId);
 prefixed_id!("@" GlobalId);
 
@@ -343,7 +380,6 @@ mod test {
         #[test]
         fn id_parsing(n: u32) {
             let nv = ValId(n);
-            let ni = InstId(n);
             let nb = BlockId(n);
             let ng = GlobalId(n);
             let fv = format!("%{n}");
@@ -351,15 +387,12 @@ mod test {
             let fb = format!("'{n}");
             let fg = format!("@{n}");
             assert_eq!(format!("{nv}"), fv);
-            assert_eq!(format!("{ni}"), fi);
             assert_eq!(format!("{nb}"), fb);
             assert_eq!(format!("{ng}"), fg);
             assert_eq!(format!("{nv:?}"), fv);
-            assert_eq!(format!("{ni:?}"), fi);
             assert_eq!(format!("{nb:?}"), fb);
             assert_eq!(format!("{ng:?}"), fg);
             assert_eq!(fv.parse(), Ok(nv));
-            assert_eq!(fi.parse(), Ok(ni));
             assert_eq!(fb.parse(), Ok(nb));
             assert_eq!(fg.parse(), Ok(ng));
             assert_eq!("%".parse::<ValId>(), Err(()));

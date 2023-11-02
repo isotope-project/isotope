@@ -64,4 +64,35 @@ define_language! {
 
 /// The ID of an `isotope` type
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
-pub struct TypeId(Id);
+pub struct TypeId(pub(crate) Id);
+
+/// The ID of a typed de-Bruijn index
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct VarId(pub u32, pub TypeId);
+
+impl std::fmt::Display for VarId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}:{}", self.0, usize::from(self.1 .0))
+    }
+}
+
+impl std::fmt::Debug for VarId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}:{}", self.0, usize::from(self.1 .0))
+    }
+}
+
+impl std::str::FromStr for VarId {
+    type Err = ();
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let (ix, ty) = input
+            .strip_prefix("#")
+            .ok_or(())?
+            .split_once(':')
+            .ok_or(())?;
+        let ix = ix.parse().map_err(|_| ())?;
+        let ty = TypeId(Id::from(ty.parse::<usize>().map_err(|_| ())?));
+        Ok(VarId(ix, ty))
+    }
+}

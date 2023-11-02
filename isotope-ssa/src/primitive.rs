@@ -9,6 +9,8 @@ use std::{
 
 use winnow::Parser;
 
+use crate::builder::SyntaxError;
+
 /// A short bitvector (up to 128 bits long)
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Bitvector {
@@ -81,20 +83,21 @@ impl Bitvector {
     }
 }
 
-impl TryFrom<isotope_syntax::primitive::Bitvector> for Bitvector {
-    type Error = ();
+impl TryFrom<&'_ isotope_syntax::primitive::Bitvector> for Bitvector {
+    type Error = SyntaxError;
 
-    fn try_from(value: isotope_syntax::primitive::Bitvector) -> Result<Self, Self::Error> {
+    fn try_from(value: &isotope_syntax::primitive::Bitvector) -> Result<Self, Self::Error> {
         if value.bitwidth > 128 {
-            return Err(());
+            return Err(SyntaxError::BitvectorError);
         }
-        let mut data = u128::from_str_radix(&value.digits, value.radix as u32).map_err(|_| ())?;
+        let mut data = u128::from_str_radix(&value.digits, value.radix as u32)
+            .map_err(|_| SyntaxError::BitvectorError)?;
         let mask = 1u128
             .checked_shl(value.bitwidth)
             .unwrap_or(0)
             .wrapping_sub(1);
         if data & !mask != 0 {
-            return Err(());
+            return Err(SyntaxError::BitvectorError);
         }
         if value.negate {
             data = data.wrapping_neg() & mask;
@@ -103,6 +106,14 @@ impl TryFrom<isotope_syntax::primitive::Bitvector> for Bitvector {
             bitwidth: value.bitwidth as u8,
             value: data,
         })
+    }
+}
+
+impl TryFrom<isotope_syntax::primitive::Bitvector> for Bitvector {
+    type Error = SyntaxError;
+
+    fn try_from(value: isotope_syntax::primitive::Bitvector) -> Result<Self, Self::Error> {
+        TryFrom::try_from(&value)
     }
 }
 
@@ -118,12 +129,12 @@ impl From<Bitvector> for isotope_syntax::primitive::Bitvector {
 }
 
 impl FromStr for Bitvector {
-    type Err = ();
+    type Err = SyntaxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         isotope_syntax::primitive::Bitvector::parser
             .parse(s)
-            .map_err(|_| ())?
+            .map_err(|_| SyntaxError::BitvectorError)?
             .try_into()
     }
 }

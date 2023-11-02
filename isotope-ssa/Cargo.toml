@@ -9,7 +9,8 @@ edition = "2021"
 isotope-syntax = { path = "../isotope-syntax" }
 
 anyhow = "1.0.75"
-egg-isotope = { git = "https://github.com/imbrem/egg", branch = "isotope-fork" }
+# Note: we use the main branch for the mutable analysis feature in issue #277
+egg = { git = "https://github.com/egraphs-good/egg", branch = "main" }
 parking_lot = "0.12.1"
 smallvec = "1.11.1"
 winnow = "0.5.16"
