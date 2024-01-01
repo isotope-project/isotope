@@ -17,8 +17,6 @@ pub mod builder;
 pub struct Function {
     /// The basic blocks in this function
     blocks: Vec<Block>,
-    /// The instructions in this function; blocks will refer to these by instruction ID
-    instructions: Vec<Instruction>,
     /// The terms defined in this function
     terms: EGraph<IsotopeLanguage, IsotopeAnalysis>,
 }
@@ -26,7 +24,7 @@ pub struct Function {
 impl Function {
     /// Construct a new block
     pub fn insert_empty_block(&mut self) -> BlockId {
-        let ix = self.instructions.len();
+        let ix = self.blocks.len();
         BlockId(ix as u32)
     }
 
