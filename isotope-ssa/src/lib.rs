@@ -25,6 +25,7 @@ impl Function {
     /// Construct a new block
     pub fn insert_empty_block(&mut self) -> BlockId {
         let ix = self.blocks.len();
+        self.blocks.push(Block::default());
         BlockId(ix as u32)
     }
 
@@ -96,24 +97,30 @@ impl Function {
 define_language! {
     enum IsotopeLanguage {
         // == Values ==
+        // === Variables and tuples ===
         // The result of an instruction
         Res(InstId),
+        // The parameter of a block
+        Param(BlockId),
         // A tuple literal
         "tup" = Tup(Tuple),
         // An index into a tuple
         "ix" = Ix([Id; 2]),
 
-        // An unresolved function call
+        // === Functions and globals ===
+        // A function call
         Call(GlobalId, Id),
         // A global value
         GlobalId(GlobalId),
+
+        // === Constants ===
         // A bitvector
         Bitvector(Bitvector),
         // An integer
         Integer(i64),
 
         // == Terminators ==
-        // An unconditional branch
+        // An unconditional branch with a given parameter
         Branch(BlockId, Id),
         // An if-then-else terminator
         "ite" = Ite([Id; 3]),
@@ -222,6 +229,8 @@ struct IsotopeMetadata {
 /// A basic block in an `isotope` function
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 struct Block {
+    /// This block's parameters
+    params: Vec<InstId>,
     /// This block's instructions
     instructions: Vec<InstId>,
     /// This block's terminator
@@ -229,21 +238,20 @@ struct Block {
 }
 
 /// An instruction in an `isotope` function
+///
+/// Having this as a separate struct, rather than storing [`ValId`]s in
+/// [`Block`], allows us to move, insert, and delete instructions without
+/// invalidating the E-graph.
+///
+/// TODO: find out how to delete instructions from the E-graph as well,
+/// reclaiming memory Can use this as a way to catch errors which come from
+/// unused instructions, as well
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Instruction {
     /// The value of the instruction
     value: ValId,
     /// The basic block of the instruction
     block: BlockId,
-}
-
-/// A value in an `isotope` function, which is one of the results of an instruction
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-struct Value {
-    /// The instruction this is a child of
-    source: InstId,
-    /// This value's type
-    ty: TypeId,
 }
 
 /// A tuple of isotope expressions
@@ -330,39 +338,6 @@ prefixed_id!("%" InstId);
 prefixed_id!("'" BlockId);
 prefixed_id!("@" GlobalId);
 
-/// A range of `ValId`s
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
-pub struct ValRange(u32, u32);
-
-impl IntoIterator for ValRange {
-    type Item = InstId;
-
-    type IntoIter = ValRangeIter;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        ValRangeIter(self)
-    }
-}
-
-/// An iterator over a range of `ValId`s
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
-pub struct ValRangeIter(pub ValRange);
-
-impl Iterator for ValRangeIter {
-    type Item = InstId;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0 .0 >= self.0 .1 {
-            None
-        } else {
-            self.0 .0 += 1;
-            Some(InstId(self.0 .0))
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -374,21 +349,28 @@ mod test {
             let nv = InstId(n);
             let nb = BlockId(n);
             let ng = GlobalId(n);
+            let nt = TypeId(Id::from(n as usize));
             let fv = format!("%{n}");
             let fi = format!("#{n}");
+            let ft = format!("!{n}");
             let fb = format!("'{n}");
             let fg = format!("@{n}");
             assert_eq!(format!("{nv}"), fv);
             assert_eq!(format!("{nb}"), fb);
             assert_eq!(format!("{ng}"), fg);
+            assert_eq!(format!("{nt}"), ft);
             assert_eq!(format!("{nv:?}"), fv);
             assert_eq!(format!("{nb:?}"), fb);
             assert_eq!(format!("{ng:?}"), fg);
+            assert_eq!(format!("{nt:?}"), ft);
             assert_eq!(fv.parse(), Ok(nv));
             assert_eq!(fb.parse(), Ok(nb));
             assert_eq!(fg.parse(), Ok(ng));
+            assert_eq!(ft.parse(), Ok(nt));
             assert_eq!("%".parse::<InstId>(), Err(()));
             assert_eq!(fi.parse::<InstId>(), Err(()));
+            assert_eq!("%".parse::<TypeId>(), Err(()));
+            assert_eq!(fi.parse::<TypeId>(), Err(()));
         }
     }
 }
