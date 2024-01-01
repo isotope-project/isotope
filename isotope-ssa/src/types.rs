@@ -43,10 +43,20 @@ impl Types {
         TypeId(self.inner.insert_full(IsotopeType::Integer).0.into())
     }
 
-    /// Get an error type
-    pub fn error(&mut self) -> TypeId {
-        TypeId(self.inner.insert_full(IsotopeType::TypeError).0.into())
+    /// Get the nth projection of a tuple type
+    ///
+    /// Return an error if the input type is not a tuple
+    pub fn proj(&self, ty: TypeId, ix: u32) -> Result<TypeId, ()> {
+        match self.inner.get_index(ty.0.into()) {
+            Some(IsotopeType::Tup(t)) => t.0.get(ix as usize).copied().map(TypeId).ok_or(()),
+            _ => Err(()),
+        }
     }
+
+    // /// Get an error type
+    // pub fn error(&mut self) -> TypeId {
+    //     TypeId(self.inner.insert_full(IsotopeType::TypeError).0.into())
+    // }
 }
 
 define_language! {
@@ -57,8 +67,8 @@ define_language! {
         Bitvector(u32),
         // An integer
         "int" = Integer,
-        // A type error
-        "error" = TypeError,
+        // // A type error
+        // "error" = TypeError,
     }
 }
 

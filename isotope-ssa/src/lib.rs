@@ -30,9 +30,9 @@ impl Function {
         BlockId(ix as u32)
     }
 
-    /// Construct a bitvector expression
-    pub fn insert_bitvector(&mut self, bits: Bitvector) -> ExprId {
-        ExprId(self.terms.add(IsotopeLanguage::Bitvector(bits)))
+    /// Construct a bitvector constant
+    pub fn insert_bitvector(&mut self, bits: Bitvector) -> ValId {
+        ValId(self.terms.add(IsotopeLanguage::Bitvector(bits)))
     }
 
     /// Get the type of bitvectors of a given bitwidth
@@ -40,60 +40,52 @@ impl Function {
         self.terms.analysis.types.bitvector(width)
     }
 
-    /// Get the type of an expression
-    pub fn expr_ty(&self, expr: ExprId) -> TypeId {
-        self.terms[expr.0].data.ty
+    /// Get a tuple type
+    pub fn tuple_ty(&mut self, types: impl IntoIterator<Item = TypeId>) -> TypeId {
+        self.terms.analysis.types.tuple(types)
     }
 
     /// Get the type of a value
-    pub fn value_ty(&self, value: ValId) -> TypeId {
-        self.terms.analysis.values[value.0 as usize].ty
+    pub fn val_ty(&self, expr: ValId) -> TypeId {
+        self.terms[expr.0].data.ty
     }
 
-    /// Construct a new instruction in a basic block, without unpacking its arguments
+    /// Get the type of an instruction
+    pub fn inst_ty(&self, inst: InstId) -> TypeId {
+        self.terms[self.terms.analysis.instructions[inst.0 as usize].value.0]
+            .data
+            .ty
+    }
+
+    /// Get the result of an instruction
+    pub fn res(&mut self, inst: InstId) -> ValId {
+        ValId(self.terms.add(IsotopeLanguage::Res(inst)))
+    }
+
+    /// Get the projection of a value
+    ///
+    /// Return an error if this is ill-typed
+    pub fn proj(&mut self, value: ValId, ix: u32) -> Result<ValId, ()> {
+        let data = self.terms[value.0].data;
+        if !data.relevant {
+            // Cannot project from a non-relevant value
+            return Err(());
+        }
+        let ty = self.terms.analysis.types.proj(data.ty, ix)?;
+        let ix = self.terms.add(IsotopeLanguage::Integer(ix as i64));
+        let proj = self.terms.add(IsotopeLanguage::Ix([value.0, ix]));
+        debug_assert_eq!(self.terms[proj].data.ty, ty);
+        Ok(ValId(proj))
+    }
+
+    /// Construct a new instruction in a basic block
     ///
     /// This will execute *after* the last current instruction, but *before* the terminator!
-    pub fn push_instruction(&mut self, block: BlockId, expr: ExprId) -> ValId {
-        let ix = ValId(self.terms.analysis.values.len() as u32);
-        let iix = InstId(self.instructions.len() as u32);
-        let value = Value {
-            source: iix,
-            ty: self.terms[expr.0].data.ty,
-        };
-        let instruction = Instruction {
-            value: expr,
-            begin: ix,
-            end: ix,
-            block,
-        };
-        self.terms.analysis.values.push(value);
-        self.instructions.push(instruction);
+    pub fn push_instruction(&mut self, block: BlockId, expr: ValId) -> InstId {
+        let ix = InstId(self.terms.analysis.instructions.len() as u32);
+        let instruction = Instruction { value: expr, block };
+        self.terms.analysis.instructions.push(instruction);
         ix
-    }
-
-    /// Construct a new instruction in a basic block, unpacking its arguments
-    pub fn push_unpacked_instruction(
-        &mut self,
-        block: BlockId,
-        expr: ExprId,
-    ) -> Result<ValRange, ()> {
-        let begin = ValId(self.terms.analysis.values.len() as u32);
-        let ty = self.terms[expr.0].data.ty;
-        let arity = self.terms.analysis.types.arity(ty);
-        let end = ValId(begin.0 + arity);
-        let iix = InstId(self.instructions.len() as u32);
-        let value = Value { source: iix, ty };
-        for _ in 0..arity.max(1) {
-            self.terms.analysis.values.push(value)
-        }
-        let instruction = Instruction {
-            value: expr,
-            begin,
-            end,
-            block,
-        };
-        self.instructions.push(instruction);
-        Ok(ValRange(begin.0, end.0))
     }
 
     /// Set the terminator of a block
@@ -106,18 +98,13 @@ impl Function {
 define_language! {
     enum IsotopeLanguage {
         // == Values ==
-        // A de-Bruijn variable
-        VarId(VarId),
-        // A local value
-        ValId(ValId),
+        // The result of an instruction
+        Res(InstId),
         // A tuple literal
         "tup" = Tup(Tuple),
         // An index into a tuple
         "ix" = Ix([Id; 2]),
-        // A let-binding
-        "let" = Let([Id; 2]),
-        // A tuple destructure
-        "unpack" = Unpack([Id; 2]),
+
         // An unresolved function call
         Call(GlobalId, Id),
         // A global value
@@ -138,8 +125,8 @@ define_language! {
 /// The analysis for expressions in an `isotope` function
 #[derive(Debug, Clone, Default)]
 struct IsotopeAnalysis {
-    /// The values defined in this function
-    values: Vec<Value>,
+    /// The instructions in this function
+    instructions: Vec<Instruction>,
     /// The types used in this function
     types: Types,
 }
@@ -152,14 +139,10 @@ impl Analysis<IsotopeLanguage> for IsotopeAnalysis {
     #[inline]
     fn make(egraph: &mut EGraph<IsotopeLanguage, Self>, enode: &IsotopeLanguage) -> Self::Data {
         match enode {
-            IsotopeLanguage::VarId(v) => IsotopeMetadata {
-                ty: v.1,
-                affine: true,
-                relevant: true,
-                central: true,
-            },
-            IsotopeLanguage::ValId(v) => IsotopeMetadata {
-                ty: egraph.analysis.values[v.0 as usize].ty,
+            IsotopeLanguage::Res(v) => IsotopeMetadata {
+                ty: egraph[egraph.analysis.instructions[v.0 as usize].value.0]
+                    .data
+                    .ty,
                 affine: true,
                 relevant: true,
                 central: true,
@@ -172,11 +155,30 @@ impl Analysis<IsotopeLanguage> for IsotopeAnalysis {
                 ),
                 affine: t.0.iter().all(|t| egraph[*t].data.affine),
                 relevant: t.0.iter().all(|t| egraph[*t].data.relevant),
+                // Note: a valid tuple should always be central!
                 central: t.0.iter().all(|t| egraph[*t].data.central),
             },
-            IsotopeLanguage::Ix(_) => IsotopeMetadata::default(), //TODO
-            IsotopeLanguage::Let(_) => IsotopeMetadata::default(), //TODO
-            IsotopeLanguage::Unpack(_) => IsotopeMetadata::default(), //TODO
+            IsotopeLanguage::Ix([val, ix]) => {
+                //TODO: clean this up...
+                let IsotopeLanguage::Integer(ix) = egraph[*ix].nodes[0] else {
+                    panic!("invalid index")
+                };
+                if ix > u32::MAX as i64 {
+                    panic!("index out of bounds")
+                }
+                let ty = egraph
+                    .analysis
+                    .types
+                    .proj(egraph[*val].data.ty, ix as u32)
+                    .expect("invalid projection");
+                IsotopeMetadata {
+                    ty,
+                    affine: egraph[*val].data.affine,
+                    // Note: a valid projection should always be both central and relevant!
+                    relevant: egraph[*val].data.relevant,
+                    central: egraph[*val].data.central,
+                }
+            }
             IsotopeLanguage::Call(_, _) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::GlobalId(_) => IsotopeMetadata::default(), //TODO
             IsotopeLanguage::Bitvector(b) => IsotopeMetadata {
@@ -232,11 +234,7 @@ struct Block {
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Instruction {
     /// The value of the instruction
-    value: ExprId,
-    /// The first child of the instruction
-    begin: ValId,
-    /// One-past the last child of the instruction, *or* the only child of the instruction if equal to `begin`
-    end: ValId,
+    value: ValId,
     /// The basic block of the instruction
     block: BlockId,
 }
@@ -281,21 +279,17 @@ impl LanguageChildren for Tuple {
     }
 }
 
-/// The ID of an `isotope` expression
+/// The ID of an `isotope` value
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct ExprId(Id);
+pub struct ValId(Id);
 
 /// The ID of an `isotope` terminator
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
 pub struct TerminatorId(Id);
 
-/// The ID of an `isotope` value generated by an instruction
+/// The ID of an `isotope` value instruction
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct ValId(u32);
-
-/// The ID of an `isotope` instruction
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
-struct InstId(u32);
+pub struct InstId(u32);
 
 /// The ID of an `isotope` block
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -334,7 +328,7 @@ macro_rules! prefixed_id {
     };
 }
 
-prefixed_id!("%" ValId);
+prefixed_id!("%" InstId);
 prefixed_id!("'" BlockId);
 prefixed_id!("@" GlobalId);
 
@@ -343,7 +337,7 @@ prefixed_id!("@" GlobalId);
 pub struct ValRange(u32, u32);
 
 impl IntoIterator for ValRange {
-    type Item = ValId;
+    type Item = InstId;
 
     type IntoIter = ValRangeIter;
 
@@ -358,7 +352,7 @@ impl IntoIterator for ValRange {
 pub struct ValRangeIter(pub ValRange);
 
 impl Iterator for ValRangeIter {
-    type Item = ValId;
+    type Item = InstId;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -366,7 +360,7 @@ impl Iterator for ValRangeIter {
             None
         } else {
             self.0 .0 += 1;
-            Some(ValId(self.0 .0))
+            Some(InstId(self.0 .0))
         }
     }
 }
@@ -379,7 +373,7 @@ mod test {
     proptest! {
         #[test]
         fn id_parsing(n: u32) {
-            let nv = ValId(n);
+            let nv = InstId(n);
             let nb = BlockId(n);
             let ng = GlobalId(n);
             let fv = format!("%{n}");
@@ -395,8 +389,8 @@ mod test {
             assert_eq!(fv.parse(), Ok(nv));
             assert_eq!(fb.parse(), Ok(nb));
             assert_eq!(fg.parse(), Ok(ng));
-            assert_eq!("%".parse::<ValId>(), Err(()));
-            assert_eq!(fi.parse::<ValId>(), Err(()));
+            assert_eq!("%".parse::<InstId>(), Err(()));
+            assert_eq!(fi.parse::<InstId>(), Err(()));
         }
     }
 }
